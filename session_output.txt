@@ -1,0 +1,74 @@
+( (1st please exit)
+print print (2nd please exit)
+) ( (1st please exit)
+( (2nd please exit)
+ (1st please exit)
+print hello world (2nd please exit)
+print (3th please exit)
+hello world (1st please exit)
+( (2nd please exit)
+( (1st please exit)
+hello world (2nd please exit)
+{ exit (1st please exit)
+{ (1st please exit)
+} (2nd please exit)
+print (1st please exit)
+{ (2nd please exit)
+print ( hello world } ) ; exit exit (1st please exit)
+hello world { (1st please exit)
+hello world ( (2nd please exit)
+hello world ( (1st please exit)
+{ hello world (2nd please exit)
+{ } (1st please exit)
+hello world { (2nd please exit)
+{
+}
+hello world
+{
+{ } (1st please exit)
+} (2nd please exit)
+} (1st please exit)
+{ hello world (2nd please exit)
+hello world
+} hello world
+print print
+print hello world
+print (
+print hello world
+print hello world
+hello
+hello world
+hello world
+print print (1st please exit)
+print (2nd please exit)
+print ( (please exit)
+
+print (please exit)
+print } (please exit)
+print (please exit)
+{ (1st please exit)
+
+print } (2nd please exit)
+
+print (1st please exit)
+
+} (2nd please exit)
+
+print ( hello world ) (1st please exit)
+
+
+print ( (1st please exit)
+
+print (2nd please exit)
+
+print { (1st please exit)
+
+print (2nd please exit)
+print { exit (please exit)
+print (please exit)
+{ (please exit)
+print (please exit)
+print { (1st please exit)
+
+print (2nd please exit)
+

@@ -1,0 +1,1679 @@
+package com.example.demo;
+
+import com.example.demo.repository.voicetotextrepository; // Import your repository
+import com.example.demo.service.AudioRecorder;
+import com.example.demo.service.VoiceRecognitionService;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.CommandLineRunner; // Use CommandLineRunner for startup logic
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.context.annotation.Bean;
+
+import java.io.FileWriter;
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Scanner;
+
+@SpringBootApplication
+public class DemoApplication {
+
+    public static void main(String[] args) {
+        SpringApplication.run(DemoApplication.class, args);
+    }
+
+    @Bean
+    public CommandLineRunner run(@Autowired voicetotextrepository repository) {
+        return args -> {
+            AudioRecorder recorder = new AudioRecorder();
+            VoiceRecognitionService voiceService = new VoiceRecognitionService(repository);
+            Scanner scanner = new Scanner(System.in);
+
+            List<String> currentSessionValues = new ArrayList<>(); // List to hold current session values
+
+            try {
+                // Define a keyword list with phonetic approximations for complex words
+                String keywordList = "[\"hello\",[\"hello world\", \"static\", \"print\", \"void\", \"main\", \"semi colon\", \"hi\", " +
+                        "\"parenthesis\", \"puh-ren-thuh-sis\", \"pra-va-li-ka\", " +
+                        "\"open parenthesis\", \"ˈoʊpən pəˈrɛnθɪsɪs\", \"addition\",\"d q\", \"ah-dih-shun\", \"comma\", \"plus\", \"plʌs\"]";
+
+                // Load the Vosk model once with the custom keyword list
+                voiceService.loadModel("src/main/resources/vosk-model-en-in-0.5", keywordList);
+
+                // Infinite loop to keep asking for new input
+                while (true) {
+                    // Prompt user to start speaking
+                    System.out.println("Press 'Enter' to start speaking...");
+                    scanner.nextLine();  // Wait for the user to press enter
+
+                    // Record audio for a fixed duration (e.g., 5 seconds)
+                    String audioFilePath = "output.wav"; // Local path for the output audio file
+                    recorder.recordAudio(audioFilePath, 5); // Adjust duration as needed
+
+                    // Recognize from the recorded audio file
+                    voiceService.recognizeFromFile(audioFilePath); // Ensure this matches your recorded file path
+
+                    // Add recognized values to the current session
+                    currentSessionValues.addAll(voiceService.getRecognizedValues()); // Add recognized values to the current session
+
+                    // Check for exit command
+                    if (currentSessionValues.contains("please exit")) {
+                        System.out.println("Please enter the file name to save the recognized values: ");
+                        String fileName = scanner.nextLine(); // Ask for the file name
+
+                        // Write recognized values of the current session to the specified .txt file
+                        writeValuesToFile(currentSessionValues, fileName); // Write all current session values
+
+                        openNotepad(fileName); // Open the file in Notepad
+
+                        currentSessionValues.clear(); // Clear current session values for the next session
+                        continue; // Continue to ask for new input
+                    }
+
+                    // Ask user if they want to continue or exit
+                    System.out.println("Do you want to record another audio? (yes/no)");
+                    String response = scanner.nextLine().trim().toLowerCase();
+                    if (response.equals("no")) {
+                        // Ask for the file name before saving and opening it in Notepad
+                        System.out.println("Please enter the file name to save the recognized values: ");
+                        String fileName = scanner.nextLine(); // Ask for the file name
+
+                        // Write recognized values of the current session to the specified .txt file
+                        writeValuesToFile(currentSessionValues, fileName);
+
+                        // Open the file in Notepad
+                        openNotepad(fileName);
+
+                        break; // Exit the loop
+                    }
+                }
+
+            } catch (IOException e) {
+                e.printStackTrace();
+            } finally {
+                scanner.close();  // Close the scanner resource
+            }
+        };
+    }
+
+    // Method to write recognized values to a .txt file
+    private void writeValuesToFile(List<String> recognizedValues, String fileName) throws IOException {
+        try (FileWriter fileWriter = new FileWriter(fileName, true)) { // Append mode
+            String line = String.join(" ", recognizedValues); // Join all recognized values with a space
+            fileWriter.write(line + System.lineSeparator()); // Write to file followed by a newline
+        }
+        System.out.println("Recognized values saved to " + fileName);
+    }
+
+    // Method to open the .txt file in Notepad
+    private void openNotepad(String filePath) {
+        try {
+            Runtime.getRuntime().exec("notepad " + filePath);
+            System.out.println("Opening " + filePath + " in Notepad...");
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+}
+
+
+_______________________________________________________________
+
+
+
+
+
+
+package com.example.demo.service;
+
+import com.example.demo.model.programodel;
+import com.example.demo.repository.voicetotextrepository;
+import edu.stanford.nlp.ling.CoreAnnotations;
+import edu.stanford.nlp.ling.CoreLabel;
+import edu.stanford.nlp.pipeline.*;
+import org.vosk.Model;
+import org.vosk.Recognizer;
+
+import javax.sound.sampled.*;
+import java.io.File;
+import java.io.FileWriter;
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Optional;
+import java.util.Properties;
+import java.util.Scanner;
+
+public class VoiceRecognitionService {
+    private Recognizer recognizer;
+    private final voicetotextrepository repository;
+    private final List<String> recognizedValues; // List to store recognized values
+    private StanfordCoreNLP stanfordNLP;  // NLP pipeline
+    private final List<String> sessionRecognizedValues; // List to store recognized values for the session
+    private Scanner scanner; // Scanner for user input
+
+    public VoiceRecognitionService(voicetotextrepository repository) {
+        this.repository = repository;
+        this.recognizedValues = new ArrayList<>(); // Initialize the list
+        this.sessionRecognizedValues = new ArrayList<>(); // Initialize session list
+        this.scanner = new Scanner(System.in); // Initialize scanner
+        initStanfordNLP();  // Initialize NLP on service creation
+    }
+
+    // Initialize Stanford CoreNLP pipeline
+    private void initStanfordNLP() {
+        Properties props = new Properties();
+        props.setProperty("annotators", "tokenize,ssplit,pos,lemma,ner");  // Annotators for tokenization, POS, NER, etc.
+        stanfordNLP = new StanfordCoreNLP(props);
+    }
+
+    // Load the Vosk model from the specified path with custom keyword list
+    public void loadModel(String modelPath, String keywordList) throws IOException {
+        Model model = new Model(modelPath);
+        recognizer = new Recognizer(model, 16000.0f, keywordList);
+    }
+
+    // Recognize speech from an audio file and process with NLP
+    public void recognizeFromFile(String filePath) throws IOException {
+        try {
+            File audioFile = new File(filePath);
+            AudioInputStream audioInputStream = AudioSystem.getAudioInputStream(audioFile);
+
+            byte[] buffer = new byte[4096];
+            int bytesRead;
+
+            while ((bytesRead = audioInputStream.read(buffer)) != -1) {
+                recognizer.acceptWaveForm(buffer, bytesRead);
+            }
+
+            String jsonResult = recognizer.getFinalResult();
+            System.out.println("Final Recognition Result: " + jsonResult);
+
+            String recognizedText = extractRecognizedText(jsonResult);
+            System.out.println("Recognized Text: '" + recognizedText + "'");
+
+            // Process the recognized text with NLP
+            processTextWithNLP(recognizedText);
+
+            // Check for the exit command
+            if (recognizedText.equalsIgnoreCase("please exit")) {
+                // Print the recognized values of the current session to the console
+                System.out.println("Recognized values for this session: " + String.join(" ", sessionRecognizedValues));
+
+                // Ask the user for the file name
+                System.out.println("Please enter the file name to save the recognized values: ");
+                String fileName = scanner.nextLine(); // Ask for the file name
+
+                // Append recognized values of the current session to the specified .txt file
+                writeValuesToFile(sessionRecognizedValues, fileName);
+
+                // Open the file in Notepad (optional)
+                openNotepad(fileName);
+
+                sessionRecognizedValues.clear(); // Clear session values after writing
+                System.out.println("Session ended. Continuing to record...");
+                return; // Exit the current method
+            } else {
+                // Fetch value from the database based on recognized text
+                Optional<programodel> commandValue = repository.findByCommand(recognizedText.toLowerCase().trim());
+                if (commandValue.isPresent()) {
+                    // Add the recognized value to the session list
+                    sessionRecognizedValues.add(commandValue.get().getValue());
+                    recognizedValues.add(commandValue.get().getValue()); // Add to all recognized values
+                    System.out.println("Recognized Value: " + commandValue.get().getValue());
+                } else {
+                    System.out.println("Command not found in database.");
+                }
+            }
+
+            audioInputStream.close();
+
+        } catch (UnsupportedAudioFileException e) {
+            System.err.println("Unsupported audio format. Please ensure the audio is in 16kHz, 16-bit PCM WAV format.");
+            e.printStackTrace();
+        }
+    }
+
+    // Process the recognized text with NLP
+    private void processTextWithNLP(String text) {
+        // Create a CoreDocument with the text
+        CoreDocument document = new CoreDocument(text);
+
+        // Annotate the document with the NLP pipeline
+        stanfordNLP.annotate(document);
+
+        // Print tokens, part-of-speech tags, and named entities for analysis
+        for (CoreLabel token : document.tokens()) {
+            String word = token.word();
+            String pos = token.get(CoreAnnotations.PartOfSpeechAnnotation.class);
+            String ner = token.get(CoreAnnotations.NamedEntityTagAnnotation.class);
+
+            System.out.println("Token: " + word + ", POS: " + pos + ", NER: " + ner);
+        }
+    }
+
+    // Extract recognized text from JSON result
+    private String extractRecognizedText(String jsonResult) {
+        return jsonResult.replaceAll("^\\{\\s*\"text\"\\s*:\\s*\"([^\"]+)\"\\s*\\}$", "$1");
+    }
+
+    // Method to append recognized values to a .txt file
+    private void writeValuesToFile(List<String> values, String fileName) {
+        try (FileWriter fileWriter = new FileWriter(fileName, true)) { // Append mode
+            for (String value : values) {
+                fileWriter.write(value + " "); // Write each value followed by a space
+            }
+            fileWriter.write(System.lineSeparator()); // Add a newline after all values
+            System.out.println("Appended recognized values to " + fileName); // Debug print
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
+    // Method to open a file in Notepad (optional)
+    private void openNotepad(String fileName) {
+        try {
+            Runtime.getRuntime().exec("notepad.exe " + fileName); // Open the specified file in Notepad
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
+    // Getter for recognized values
+    public List<String> getRecognizedValues() {
+        return recognizedValues; // Return all recognized values
+    }
+
+    // Getter for session recognized values
+    public List<String> getSessionRecognizedValues() {
+        return sessionRecognizedValues; // Return the current session's recognized values
+    }
+}
+
+
+_________________________________________________________________
+
+
+
+package com.example.demo.service;
+
+import javax.sound.sampled.*;
+import java.io.File;
+import java.io.IOException;
+
+public class AudioRecorder {
+    private AudioFormat audioFormat;
+    private TargetDataLine targetLine;
+
+    public void recordAudio(String filePath, int durationInSeconds) {
+        audioFormat = new AudioFormat(16000, 16, 1, true, true); // PCM format
+        DataLine.Info info = new DataLine.Info(TargetDataLine.class, audioFormat);
+
+        try {
+            targetLine = (TargetDataLine) AudioSystem.getLine(info);
+            targetLine.open(audioFormat);
+            targetLine.start();
+
+            System.out.println("Recording...");
+
+            AudioInputStream audioInputStream = new AudioInputStream(targetLine);
+            File audioFile = new File(filePath);
+            // Start recording
+            new Thread(() -> {
+                try {
+                    Thread.sleep(durationInSeconds * 1000);
+                } catch (InterruptedException e) {
+                    e.printStackTrace();
+                }
+                targetLine.stop();
+                targetLine.close();
+                System.out.println("Recording finished.");
+            }).start();
+
+            // Write audio data to file
+            AudioSystem.write(audioInputStream, AudioFileFormat.Type.WAVE, audioFile);
+        } catch (LineUnavailableException e) {
+            e.printStackTrace();
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+------------------------------------------vscode but in single line
+package com.example.demo;
+
+import com.example.demo.repository.voicetotextrepository;
+import com.example.demo.service.AudioRecorder;
+import com.example.demo.service.VoiceRecognitionService;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.CommandLineRunner;
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.context.annotation.Bean;
+
+import java.io.FileWriter;
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Scanner;
+
+@SpringBootApplication
+public class DemoApplication {
+
+    public static void main(String[] args) {
+        SpringApplication.run(DemoApplication.class, args);
+    }
+
+    @Bean
+    public CommandLineRunner run(@Autowired voicetotextrepository repository) {
+        return args -> {
+            AudioRecorder recorder = new AudioRecorder();
+            VoiceRecognitionService voiceService = new VoiceRecognitionService(repository);
+            Scanner scanner = new Scanner(System.in);
+
+            List<String> currentSessionValues = new ArrayList<>();
+            String fileName = "recognized_values.txt";
+
+            try {
+                // Load Vosk model with keywords
+                String keywordList = "[\"hello\", [\"hello world\", \"static\", \"print\", \"void\", \"main\", \"semi colon\", \"hi\", " +
+                        "\"parenthesis\", \"puh-ren-thuh-sis\", \"pra-va-li-ka\", " +
+                        "\"open parenthesis\", \"ˈoʊpən pəˈrɛnθɪsɪs\", \"addition\",\"d q\", \"ah-dih-shun\", \"comma\", \"plus\", \"plʌs\"]";
+                voiceService.loadModel("src/main/resources/vosk-model-en-in-0.5", keywordList);
+
+                while (true) {
+                    System.out.println("Press 'Enter' to start speaking...");
+                    scanner.nextLine();
+
+                    String audioFilePath = "output.wav";
+                    recorder.recordAudio(audioFilePath, 5);
+
+                    voiceService.recognizeFromFile(audioFilePath);
+
+                    // Clear the currentSessionValues list before adding new recognized values
+                    currentSessionValues.clear();
+                    currentSessionValues.addAll(voiceService.getRecognizedValues());
+
+                    // Save and open values when "please exit" or "no" is encountered
+                    if (currentSessionValues.contains("please exit")) {
+                        saveAndOpenInVSCode(currentSessionValues, fileName);
+                        currentSessionValues.clear();
+                        continue;
+                    }
+
+                    System.out.println("Do you want to record another audio? (yes/no)");
+                    String response = scanner.nextLine().trim().toLowerCase();
+                    if (response.equals("no")) {
+                        saveAndOpenInVSCode(currentSessionValues, fileName);
+                        break;
+                    }
+                }
+
+            } catch (IOException e) {
+                e.printStackTrace();
+            } finally {
+                scanner.close();
+            }
+        };
+    }
+
+    // Method to save recognized values to the file and open it in VS Code
+    private void saveAndOpenInVSCode(List<String> currentSessionValues, String fileName) throws IOException {
+        writeValuesToFile(currentSessionValues, fileName);
+        openInVSCode(fileName);
+    }
+
+    // Method to write recognized values to a file, overwriting any previous content
+    private void writeValuesToFile(List<String> recognizedValues, String fileName) throws IOException {
+        try (FileWriter fileWriter = new FileWriter(fileName, false)) {
+            String line = String.join(" ", recognizedValues);
+            fileWriter.write(line + System.lineSeparator());
+        }
+        System.out.println("Recognized values saved to " + fileName);
+    }
+
+    // Method to open the file in VS Code
+    private void openInVSCode(String filePath) {
+        try {
+            String command = "\"C:\\Users\\HP\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe\" " + filePath;
+            ProcessBuilder processBuilder = new ProcessBuilder(command.split(" "));
+            processBuilder.start();
+            System.out.println("Opened " + filePath + " in Visual Studio Code.");
+        } catch (IOException e) {
+            System.out.println("Failed to open file in VS Code: " + e.getMessage());
+        }
+    }
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+-------------------------------------------------------opening in vs code code
+
+package com.example.demo;
+
+import com.example.demo.repository.voicetotextrepository;
+import com.example.demo.service.AudioRecorder;
+import com.example.demo.service.VoiceRecognitionService;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.CommandLineRunner;
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.context.annotation.Bean;
+
+import java.io.FileWriter;
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Scanner;
+
+@SpringBootApplication
+public class DemoApplication {
+
+    public static void main(String[] args) {
+        SpringApplication.run(DemoApplication.class, args);
+    }
+
+    @Bean
+    public CommandLineRunner run(@Autowired voicetotextrepository repository) {
+        return args -> {
+            AudioRecorder recorder = new AudioRecorder();
+            VoiceRecognitionService voiceService = new VoiceRecognitionService(repository);
+            Scanner scanner = new Scanner(System.in);
+
+            List<String> currentSessionValues = new ArrayList<>();
+            int helloCount = 0;
+
+            try {
+                String keywordList = "[\"hello\", [\"hello world\", \"static\", \"print\", \"void\", \"main\", " +
+                        "\"semi colon\", \"hi\", \"parenthesis\", \"puh-ren-thuh-sis\", \"pra-va-li-ka\", " +
+                        "\"open parenthesis\", \"ˈoʊpən pəˈrɛnθɪsɪs\", \"addition\", \"d q\", \"ah-dih-shun\", " +
+                        "\"comma\", \"plus\", \"plʌs\"]";
+                voiceService.loadModel("src/main/resources/vosk-model-en-in-0.5", keywordList);
+
+                while (true) {
+                    System.out.println("Press 'Enter' to start speaking...");
+                    scanner.nextLine();
+
+                    String audioFilePath = "output.wav";
+                    recorder.recordAudio(audioFilePath, 5);
+                    voiceService.recognizeFromFile(audioFilePath);
+
+                    currentSessionValues.addAll(voiceService.getRecognizedValues());
+
+                    for (String value : voiceService.getRecognizedValues()) {
+                        if (value.equalsIgnoreCase("hello")) {
+                            helloCount++;
+                            writeValuesToFile(value, "recognized_text.txt");
+
+                            if (helloCount == 7) {
+                                String pythonFileName = "hello_hello.py";
+                                convertTextToPython("recognized_text.txt", pythonFileName);
+                                openInVSCode(pythonFileName);
+                                helloCount = 0;
+                            }
+                        }
+                    }
+
+                    System.out.println("Do you want to record another audio? (yes/no)");
+                    String response = scanner.nextLine().trim().toLowerCase();
+                    if (response.equals("no")) {
+                        System.out.println("Please enter the existing file name (without extension) to convert to a Python file: ");
+                        String fileName = scanner.nextLine().trim();
+
+                        String txtFileName = fileName + ".txt";
+                        String pyFileName = fileName + ".py";
+
+                        // Convert the text file to a Python file
+                        convertTextToPython(txtFileName, pyFileName);
+
+                        // Open and run the Python file in VS Code
+                        openInVSCode(pyFileName);
+                        break;
+                    }
+                }
+
+            } catch (IOException e) {
+                e.printStackTrace();
+            } finally {
+                scanner.close();
+            }
+        };
+    }
+
+    private void writeValuesToFile(String value, String fileName) throws IOException {
+        try (FileWriter fileWriter = new FileWriter(fileName, true)) {
+            fileWriter.write(value + " ");
+        }
+        System.out.println("Appended '" + value + "' to " + fileName);
+    }
+
+    private void convertTextToPython(String inputFileName, String outputFileName) throws IOException {
+        List<String> lines = java.nio.file.Files.readAllLines(java.nio.file.Paths.get(inputFileName));
+        try (FileWriter fileWriter = new FileWriter(outputFileName)) {
+            for (String line : lines) {
+                fileWriter.write(line + System.lineSeparator());
+            }
+        }
+        System.out.println("Converted " + inputFileName + " to " + outputFileName);
+    }
+
+    // Method to open the .py file in VS Code and run it
+    private void openInVSCode(String filePath) {
+        try {
+            // Modify the command to open VS Code and immediately run the Python file
+            String command = "\"C:\\Users\\HP\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe\" "
+                    + filePath
+                    + " && python " + filePath;
+
+            ProcessBuilder processBuilder = new ProcessBuilder("cmd.exe", "/c", command);
+            processBuilder.start();
+
+            System.out.println("Opened " + filePath + " in Visual Studio Code and running it...");
+        } catch (IOException e) {
+            System.out.println("Failed to open and run file in VS Code: " + e.getMessage());
+        }
+    }
+
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+__________________________________________________________opens in vs and runs in cmd
+
+
+
+package com.example.demo;
+
+import com.example.demo.repository.voicetotextrepository;
+import com.example.demo.service.AudioRecorder;
+import com.example.demo.service.VoiceRecognitionService;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.CommandLineRunner;
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.context.annotation.Bean;
+
+import java.io.FileWriter;
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Scanner;
+
+@SpringBootApplication
+public class DemoApplication {
+
+    public static void main(String[] args) {
+        SpringApplication.run(DemoApplication.class, args);
+    }
+
+    @Bean
+    public CommandLineRunner run(@Autowired voicetotextrepository repository) {
+        return args -> {
+            AudioRecorder recorder = new AudioRecorder();
+            VoiceRecognitionService voiceService = new VoiceRecognitionService(repository);
+            Scanner scanner = new Scanner(System.in);
+
+            List<String> currentSessionValues = new ArrayList<>();
+            int helloCount = 0;
+
+            try {
+                String keywordList = "[\"hello\", [\"hello world\", \"static\", \"print\", \"void\", \"main\", " +
+                        "\"semi colon\", \"hi\", \"parenthesis\", \"puh-ren-thuh-sis\", \"pra-va-li-ka\", " +
+                        "\"open parenthesis\", \"ˈoʊpən pəˈrɛnθɪsɪs\", \"addition\", \"d q\", \"ah-dih-shun\", " +
+                        "\"comma\", \"plus\", \"plʌs\"]";
+                voiceService.loadModel("src/main/resources/vosk-model-en-in-0.5", keywordList);
+
+                while (true) {
+                    System.out.println("Press 'Enter' to start speaking...");
+                    scanner.nextLine();
+
+                    String audioFilePath = "output.wav";
+                    recorder.recordAudio(audioFilePath, 5);
+                    voiceService.recognizeFromFile(audioFilePath);
+
+                    currentSessionValues.addAll(voiceService.getRecognizedValues());
+
+                    for (String value : voiceService.getRecognizedValues()) {
+                        if (value.equalsIgnoreCase("hello")) {
+                            helloCount++;
+                            writeValuesToFile(value, "recognized_text.txt");
+
+                            if (helloCount == 7) {
+                                String pythonFileName = "hello_hello.py";
+                                convertTextToPython("recognized_text.txt", pythonFileName);
+                                openInVSCode(pythonFileName);
+                                helloCount = 0;
+                            }
+                        }
+                    }
+
+                    System.out.println("Do you want to record another audio? (yes/no)");
+                    String response = scanner.nextLine().trim().toLowerCase();
+                    if (response.equals("no")) {
+                        System.out.println("Please enter the existing file name (without extension) to convert to a Python file: ");
+                        String fileName = scanner.nextLine().trim();
+
+                        String txtFileName = fileName + ".txt";
+                        String pyFileName = fileName + ".py";
+
+                        // Convert the text file to a Python file
+                        convertTextToPython(txtFileName, pyFileName);
+
+                        // Open and run the Python file in VS Code
+                        openInVSCode(pyFileName);
+                        break;
+                    }
+                }
+
+            } catch (IOException e) {
+                e.printStackTrace();
+            } finally {
+                scanner.close();
+            }
+        };
+    }
+
+    private void writeValuesToFile(String value, String fileName) throws IOException {
+        try (FileWriter fileWriter = new FileWriter(fileName, true)) {
+            fileWriter.write(value + " ");
+        }
+        System.out.println("Appended '" + value + "' to " + fileName);
+    }
+
+    private void convertTextToPython(String inputFileName, String outputFileName) throws IOException {
+        List<String> lines = java.nio.file.Files.readAllLines(java.nio.file.Paths.get(inputFileName));
+        try (FileWriter fileWriter = new FileWriter(outputFileName)) {
+            for (String line : lines) {
+                fileWriter.write(line + System.lineSeparator());
+            }
+        }
+        System.out.println("Converted " + inputFileName + " to " + outputFileName);
+    }
+
+    // Method to open the .py file in VS Code and run it
+
+    private void openInVSCode(String filePath) {
+        try {
+            // First, open the Python file in VS Code
+            String vsCodePath = "\"C:\\Users\\HP\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe\"";
+            ProcessBuilder vsCodeProcessBuilder = new ProcessBuilder("cmd.exe", "/c", vsCodePath, filePath);
+            vsCodeProcessBuilder.start();
+            System.out.println("Opened " + filePath + " in Visual Studio Code.");
+
+            // Then, open a new command prompt to run the Python file and keep it open
+            String command = "start cmd.exe /k \"python " + filePath + " && pause\"";
+            ProcessBuilder cmdProcessBuilder = new ProcessBuilder("cmd.exe", "/c", command);
+            cmdProcessBuilder.redirectErrorStream(true);
+            cmdProcessBuilder.start();
+
+            System.out.println("Running " + filePath + " in command prompt...");
+        } catch (IOException e) {
+            System.out.println("Failed to open and run Python file: " + e.getMessage());
+        }
+    }
+
+
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+-------------------------------------------------------------------------------------------------
+
+
+
+
+
+
+
+
+
+-------------------------------------------------------opens in chrome
+
+
+package com.example.demo;
+
+import com.example.demo.repository.voicetotextrepository;
+import com.example.demo.service.AudioRecorder;
+import com.example.demo.service.VoiceRecognitionService;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.CommandLineRunner;
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.context.annotation.Bean;
+
+import java.io.BufferedReader;
+import java.io.FileWriter;
+import java.io.IOException;
+import java.io.InputStreamReader;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Scanner;
+
+@SpringBootApplication
+public class DemoApplication {
+
+    public static void main(String[] args) {
+        SpringApplication.run(DemoApplication.class, args);
+    }
+
+    @Bean
+    public CommandLineRunner run(@Autowired voicetotextrepository repository) {
+        return args -> {
+            AudioRecorder recorder = new AudioRecorder();
+            VoiceRecognitionService voiceService = new VoiceRecognitionService(repository);
+            Scanner scanner = new Scanner(System.in);
+
+            List<String> currentSessionValues = new ArrayList<>();
+            int helloCount = 0;
+
+            try {
+                String keywordList = "[\"hello\", [\"hello world\", \"static\", \"print\", \"void\", \"main\", " +
+                        "\"semi colon\", \"hi\", \"parenthesis\", \"puh-ren-thuh-sis\", \"pra-va-li-ka\", " +
+                        "\"open parenthesis\", \"ˈoʊpən pəˈrɛnθɪsɪs\", \"addition\", \"d q\", \"ah-dih-shun\", " +
+                        "\"comma\", \"plus\", \"plʌs\"]";
+                voiceService.loadModel("src/main/resources/vosk-model-en-in-0.5", keywordList);
+
+                while (true) {
+                    System.out.println("Press 'Enter' to start speaking...");
+                    scanner.nextLine();
+
+                    String audioFilePath = "output.wav";
+                    recorder.recordAudio(audioFilePath, 5);
+                    voiceService.recognizeFromFile(audioFilePath);
+
+                    currentSessionValues.addAll(voiceService.getRecognizedValues());
+
+                    for (String value : voiceService.getRecognizedValues()) {
+                        if (value.equalsIgnoreCase("hello")) {
+                            helloCount++;
+                            writeValuesToFile(value, "recognized_text.txt");
+
+                            if (helloCount == 7) {
+                                String pythonFileName = "hello_hello.py";
+                                convertTextToPython("recognized_text.txt", pythonFileName);
+                                openInVSCode(pythonFileName);
+                                helloCount = 0;
+                            }
+                        }
+                    }
+
+                    System.out.println("Do you want to record another audio? (yes/no)");
+                    String response = scanner.nextLine().trim().toLowerCase();
+                    if (response.equals("no")) {
+                        System.out.println("Please enter the existing file name (without extension) to convert to a Python file: ");
+                        String fileName = scanner.nextLine().trim();
+
+                        String txtFileName = fileName + ".txt";
+                        String pyFileName = fileName + ".py";
+
+                        // Convert the text file to a Python file
+                        convertTextToPython(txtFileName, pyFileName);
+
+                        // Open and run the Python file in VS Code
+                        openInVSCode(pyFileName);
+                        break;
+                    }
+                }
+
+            } catch (IOException e) {
+                e.printStackTrace();
+            } finally {
+                scanner.close();
+            }
+        };
+    }
+
+    private void writeValuesToFile(String value, String fileName) throws IOException {
+        try (FileWriter fileWriter = new FileWriter(fileName, true)) {
+            fileWriter.write(value + " ");
+        }
+        System.out.println("Appended '" + value + "' to " + fileName);
+    }
+
+    private void convertTextToPython(String inputFileName, String outputFileName) throws IOException {
+        List<String> lines = java.nio.file.Files.readAllLines(java.nio.file.Paths.get(inputFileName));
+        try (FileWriter fileWriter = new FileWriter(outputFileName)) {
+            for (String line : lines) {
+                fileWriter.write(line + System.lineSeparator());
+            }
+        }
+        System.out.println("Converted " + inputFileName + " to " + outputFileName);
+    }
+
+    // Method to open the .py file in VS Code and run it
+
+
+
+    public String openInVSCode(String filePath) {
+        StringBuilder output = new StringBuilder();
+        try {
+            // Open the Python file in VS Code
+            String vsCodePath = "\"C:\\Users\\HP\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe\"";
+            ProcessBuilder vsCodeProcessBuilder = new ProcessBuilder("cmd.exe", "/c", vsCodePath + " " + filePath);
+            vsCodeProcessBuilder.start();
+            System.out.println("Opened " + filePath + " in Visual Studio Code.");
+
+            // Command to run the Python script and capture the output
+            ProcessBuilder cmdProcessBuilder = new ProcessBuilder("python", filePath);
+            cmdProcessBuilder.redirectErrorStream(true);
+
+            Process process = cmdProcessBuilder.start();
+            try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    output.append(line).append("\n");
+                }
+            }
+
+            // Wait for the process to complete
+            process.waitFor();
+
+            System.out.println("Executed " + filePath + " and captured output.");
+        } catch (IOException | InterruptedException e) {
+            System.out.println("Failed to open and run Python file: " + e.getMessage());
+        }
+        return output.toString();
+    }
+
+
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+-----------------------------------------------opening in vs and chrome automatic
+
+
+
+package com.example.demo;
+
+import com.example.demo.repository.voicetotextrepository;
+import com.example.demo.service.AudioRecorder;
+import com.example.demo.service.VoiceRecognitionService;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.CommandLineRunner;
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.context.annotation.Bean;
+import org.springframework.stereotype.Controller;
+import org.springframework.ui.Model;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestParam;
+
+import java.io.BufferedReader;
+import java.io.FileWriter;
+import java.io.IOException;
+import java.io.InputStreamReader;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Scanner;
+
+@SpringBootApplication
+@Controller
+public class DemoApplication {
+
+    public static void main(String[] args) {
+        SpringApplication.run(DemoApplication.class, args);
+    }
+
+    @Bean
+    public CommandLineRunner run(@Autowired voicetotextrepository repository) {
+        return args -> {
+            AudioRecorder recorder = new AudioRecorder();
+            VoiceRecognitionService voiceService = new VoiceRecognitionService(repository);
+            Scanner scanner = new Scanner(System.in);
+
+            List<String> currentSessionValues = new ArrayList<>();
+            int helloCount = 0;
+
+            try {
+                String keywordList = "[\"hello\", [\"hello world\", \"static\", \"print\", \"void\", \"main\", " +
+                        "\"semi colon\", \"hi\", \"parenthesis\", \"puh-ren-thuh-sis\", \"pra-va-li-ka\", " +
+                        "\"open parenthesis\", \"ˈoʊpən pəˈrɛnθɪsɪs\", \"addition\", \"d q\", \"ah-dih-shun\", " +
+                        "\"comma\", \"plus\", \"plʌs\"]";
+                voiceService.loadModel("src/main/resources/vosk-model-en-in-0.5", keywordList);
+
+                while (true) {
+                    System.out.println("Press 'Enter' to start speaking...");
+                    scanner.nextLine();
+
+                    String audioFilePath = "output.wav";
+                    recorder.recordAudio(audioFilePath, 5);
+                    voiceService.recognizeFromFile(audioFilePath);
+
+                    currentSessionValues.addAll(voiceService.getRecognizedValues());
+
+                    for (String value : voiceService.getRecognizedValues()) {
+                        if (value.equalsIgnoreCase("hello")) {
+                            helloCount++;
+                            writeValuesToFile(value, "recognized_text.txt");
+
+                            if (helloCount == 7) {
+                                String pythonFileName = "hello_hello.py";
+                                convertTextToPython("recognized_text.txt", pythonFileName);
+                                String output = openInVSCode(pythonFileName); // Open in VS Code
+                                helloCount = 0;
+
+                                // Wait for 5 seconds before opening in Chrome
+                                Thread.sleep(5000);
+
+                                // Open in Chrome
+                                openInChrome(pythonFileName, output);
+                            }
+                        }
+                    }
+
+                    System.out.println("Do you want to record another audio? (yes/no)");
+                    String response = scanner.nextLine().trim().toLowerCase();
+                    if (response.equals("no")) {
+                        System.out.println("Please enter the existing file name (without extension) to convert to a Python file: ");
+                        String fileName = scanner.nextLine().trim();
+
+                        String txtFileName = fileName + ".txt";
+                        String pyFileName = fileName + ".py";
+
+                        // Convert the text file to a Python file
+                        convertTextToPython(txtFileName, pyFileName);
+
+                        // Open and run the Python file in VS Code
+                        String output = openInVSCode(pyFileName);
+
+                        // Wait for 5 seconds before opening in Chrome
+                        Thread.sleep(5000);
+
+                        // Open the output page in Chrome with the captured output
+                        openInChrome(pyFileName, output);
+                        break;
+                    }
+                }
+
+            } catch (IOException | InterruptedException e) {
+                e.printStackTrace();
+            } finally {
+                scanner.close();
+            }
+        };
+    }
+
+    private void writeValuesToFile(String value, String fileName) throws IOException {
+        try (FileWriter fileWriter = new FileWriter(fileName, true)) {
+            fileWriter.write(value + " ");
+        }
+        System.out.println("Appended '" + value + "' to " + fileName);
+    }
+
+    private void convertTextToPython(String inputFileName, String outputFileName) throws IOException {
+        List<String> lines = java.nio.file.Files.readAllLines(java.nio.file.Paths.get(inputFileName));
+        try (FileWriter fileWriter = new FileWriter(outputFileName)) {
+            for (String line : lines) {
+                fileWriter.write(line + System.lineSeparator());
+            }
+        }
+        System.out.println("Converted " + inputFileName + " to " + outputFileName);
+    }
+
+    // Method to open the .py file in VS Code and run it
+    // Open and run the Python file in VS Code, then capture output and display it on a webpage in Chrome
+    public String openInVSCode(String filePath) {
+        StringBuilder output = new StringBuilder();
+        try {
+            // Correct VS Code executable path
+            String vsCodePath = "C:\\Users\\HP\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe";
+
+            // Open the Python file in VS Code
+            ProcessBuilder vsCodeProcessBuilder = new ProcessBuilder(vsCodePath, filePath);
+            vsCodeProcessBuilder.start();
+
+            System.out.println("Opened " + filePath + " in Visual Studio Code.");
+
+            // Command to run the Python script and capture the output
+            ProcessBuilder cmdProcessBuilder = new ProcessBuilder("python", filePath);
+            cmdProcessBuilder.redirectErrorStream(true);
+
+            Process process = cmdProcessBuilder.start();
+            try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    output.append(line).append("\n");
+                }
+            }
+
+            // Wait for the process to complete
+            process.waitFor();
+
+            System.out.println("Executed " + filePath + " and captured output.");
+
+            // Add a delay before Chrome opens
+            Thread.sleep(5000);  // 5-second delay
+        } catch (IOException | InterruptedException e) {
+            System.out.println("Failed to open and run Python file: " + e.getMessage());
+        }
+        return output.toString();
+    }
+
+
+    public void openInChrome(String fileName, String output) {
+        try {
+            // Encode the output to make it URL-safe
+            String encodedOutput = java.net.URLEncoder.encode(output, "UTF-8");
+
+            // URL for the output page
+            String url = "http://localhost:6564/show-output?output=" + encodedOutput;
+
+            // Chrome executable path
+            String chromePath = "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe";
+            ProcessBuilder chromeProcess = new ProcessBuilder(chromePath, url);
+            chromeProcess.start();
+
+            System.out.println("Opened Chrome with output at " + url);
+        } catch (IOException e) {
+            System.out.println("Failed to open Chrome: " + e.getMessage());
+        }
+    }
+
+
+    // Controller method to render the HTML page with the output
+    @GetMapping("/show-output")
+    public String showOutput(@RequestParam String output, Model model) {
+        model.addAttribute("scriptOutput", output);
+        return "output"; // Returns the Thymeleaf template to render
+    }
+}
+
+
+
+
+
+Prav@123
+
+
+
+
+
+http://localhost:8080/swagger-ui/index.html
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+API key
+
+
+4b660c838d6e81418a518417af6aaa0c5f06f3b0
+
+
+
+
+
+
+
+
+
+
+
+-----voice class
+package com.example.demo.service;
+
+import com.example.demo.model.programodel;
+import com.example.demo.repository.voicetotextrepository;
+import edu.stanford.nlp.ling.CoreAnnotations;
+import edu.stanford.nlp.ling.CoreLabel;
+import edu.stanford.nlp.pipeline.*;
+import org.vosk.Model;
+import org.vosk.Recognizer;
+
+import javax.sound.sampled.*;
+import java.io.File;
+import java.io.FileWriter;
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Optional;
+import java.util.Properties;
+import java.util.Scanner;
+
+public class VoiceRecognitionService {
+    private Recognizer recognizer;
+    private final voicetotextrepository repository;
+    private final List<String> recognizedValues; // List to store recognized values
+    private StanfordCoreNLP stanfordNLP;  // NLP pipeline
+    private final List<String> sessionRecognizedValues; // List to store recognized values for the session
+    private Scanner scanner; // Scanner for user input
+
+    public VoiceRecognitionService(voicetotextrepository repository) {
+        this.repository = repository;
+        this.recognizedValues = new ArrayList<>(); // Initialize the list
+        this.sessionRecognizedValues = new ArrayList<>(); // Initialize session list
+        this.scanner = new Scanner(System.in); // Initialize scanner
+        initStanfordNLP();  // Initialize NLP on service creation
+    }
+
+    // Initialize Stanford CoreNLP pipeline
+    private void initStanfordNLP() {
+        Properties props = new Properties();
+        props.setProperty("annotators", "tokenize,ssplit,pos,lemma,ner");  // Annotators for tokenization, POS, NER, etc.
+        stanfordNLP = new StanfordCoreNLP(props);
+    }
+
+    // Load the Vosk model from the specified path with custom keyword list
+    public void loadModel(String modelPath, String keywordList) throws IOException {
+        Model model = new Model(modelPath);
+        recognizer = new Recognizer(model, 16000.0f, keywordList);
+    }
+
+    // Recognize speech from an audio file and process with NLP
+    public void recognizeFromFile(String filePath) throws IOException {
+        try {
+            File audioFile = new File(filePath);
+            AudioInputStream audioInputStream = AudioSystem.getAudioInputStream(audioFile);
+
+            byte[] buffer = new byte[4096];
+            int bytesRead;
+
+            while ((bytesRead = audioInputStream.read(buffer)) != -1) {
+                recognizer.acceptWaveForm(buffer, bytesRead);
+            }
+
+            String jsonResult = recognizer.getFinalResult();
+            System.out.println("Final Recognition Result: " + jsonResult);
+
+            String recognizedText = extractRecognizedText(jsonResult);
+            System.out.println("Recognized Text: '" + recognizedText + "'");
+
+            // Process the recognized text with NLP
+            processTextWithNLP(recognizedText);
+
+            // Check for the exit command
+            if (recognizedText.equalsIgnoreCase("please exit")) {
+                // Print the recognized values of the current session to the console
+                System.out.println("Recognized values for this session: " + String.join(" ", sessionRecognizedValues));
+
+                // Ask the user for the file name
+                System.out.println("Please enter the file name to save the recognized values: ");
+                String fileName = scanner.nextLine(); // Ask for the file name
+
+                // Append recognized values of the current session to the specified .txt file
+                writeValuesToFile(sessionRecognizedValues, fileName);
+
+                // Open the file in Notepad (optional)
+                openNotepad(fileName);
+
+                sessionRecognizedValues.clear(); // Clear session values after writing
+                System.out.println("Session ended. Continuing to record...");
+                return; // Exit the current method
+            } else {
+                // Fetch value from the database based on recognized text
+                Optional<programodel> commandValue = repository.findByCommand(recognizedText.toLowerCase().trim());
+                if (commandValue.isPresent()) {
+                    // Add the recognized value to the session list
+                    sessionRecognizedValues.add(commandValue.get().getValue());
+                    recognizedValues.add(commandValue.get().getValue()); // Add to all recognized values
+                    System.out.println("Recognized Value: " + commandValue.get().getValue());
+                } else {
+                    System.out.println("Command not found in database.");
+                }
+            }
+
+            audioInputStream.close();
+
+        } catch (UnsupportedAudioFileException e) {
+            System.err.println("Unsupported audio format. Please ensure the audio is in 16kHz, 16-bit PCM WAV format.");
+            e.printStackTrace();
+        }
+    }
+
+    // Process the recognized text with NLP
+    private void processTextWithNLP(String text) {
+        // Create a CoreDocument with the text
+        CoreDocument document = new CoreDocument(text);
+
+        // Annotate the document with the NLP pipeline
+        stanfordNLP.annotate(document);
+
+        // Print tokens, part-of-speech tags, and named entities for analysis
+        for (CoreLabel token : document.tokens()) {
+            String word = token.word();
+            String pos = token.get(CoreAnnotations.PartOfSpeechAnnotation.class);
+            String ner = token.get(CoreAnnotations.NamedEntityTagAnnotation.class);
+
+            System.out.println("Token: " + word + ", POS: " + pos + ", NER: " + ner);
+        }
+    }
+
+    // Extract recognized text from JSON result
+    private String extractRecognizedText(String jsonResult) {
+        return jsonResult.replaceAll("^\\{\\s*\"text\"\\s*:\\s*\"([^\"]+)\"\\s*\\}$", "$1");
+    }
+
+    // Method to append recognized values to a .txt file
+    private void writeValuesToFile(List<String> values, String fileName) {
+        try (FileWriter fileWriter = new FileWriter(fileName, true)) { // Append mode
+            for (String value : values) {
+                fileWriter.write(value + " "); // Write each value followed by a space
+            }
+            fileWriter.write(System.lineSeparator()); // Add a newline after all values
+            System.out.println("Appended recognized values to " + fileName); // Debug print
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
+    // Method to open a file in Notepad (optional)
+    private void openNotepad(String fileName) {
+        try {
+            Runtime.getRuntime().exec("notepad.exe " + fileName); // Open the specified file in Notepad
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+
+    // Getter for recognized values
+    public List<String> getRecognizedValues() {
+        return recognizedValues; // Return all recognized values
+    }
+
+    // Getter for session recognized values
+    public List<String> getSessionRecognizedValues() {
+        return sessionRecognizedValues; // Return the current session's recognized values
+    }
+}
+
+
+-----demo class
+
+
+
+package com.example.demo;
+
+import com.example.demo.repository.voicetotextrepository;
+import com.example.demo.service.AudioRecorder;
+import com.example.demo.service.VoiceRecognitionService;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.CommandLineRunner;
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.context.annotation.Bean;
+import org.springframework.stereotype.Controller;
+import org.springframework.ui.Model;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.RequestParam;
+
+import java.io.BufferedReader;
+import java.io.FileWriter;
+import java.io.IOException;
+import java.io.InputStreamReader;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Scanner;
+
+@SpringBootApplication
+@Controller
+public class DemoApplication {
+
+    public static void main(String[] args) {
+        SpringApplication.run(DemoApplication.class, args);
+    }
+
+    @Bean
+    public CommandLineRunner run(@Autowired voicetotextrepository repository) {
+        return args -> {
+            AudioRecorder recorder = new AudioRecorder();
+            VoiceRecognitionService voiceService = new VoiceRecognitionService(repository);
+            Scanner scanner = new Scanner(System.in);
+
+            List<String> currentSessionValues = new ArrayList<>();
+            int helloCount = 0;
+
+            try {
+                String keywordList = "[\"hello\", [\"hello world\", \"static\", \"print\", \"void\", \"main\", " +
+                        "\"semi colon\", \"hi\", \"parenthesis\", \"puh-ren-thuh-sis\", \"pra-va-li-ka\", " +
+                        "\"open parenthesis\", \"ˈoʊpən pəˈrɛnθɪsɪs\", \"addition\", \"d q\", \"ah-dih-shun\", " +
+                        "\"comma\", \"plus\", \"plʌs\"]";
+                voiceService.loadModel("src/main/resources/vosk-model-en-in-0.5", keywordList);
+
+                while (true) {
+                    System.out.println("Press 'Enter' to start speaking...");
+                    scanner.nextLine();
+
+                    String audioFilePath = "output.wav";
+                    recorder.recordAudio(audioFilePath, 5);
+                    voiceService.recognizeFromFile(audioFilePath);
+
+                    currentSessionValues.addAll(voiceService.getRecognizedValues());
+
+                    for (String value : voiceService.getRecognizedValues()) {
+                        if (value.equalsIgnoreCase("hello")) {
+                            helloCount++;
+                            writeValuesToFile(value, "recognized_text.txt");
+
+                            if (helloCount == 7) {
+                                String pythonFileName = "hello_hello.py";
+                                convertTextToPython("recognized_text.txt", pythonFileName);
+                                String output = openInVSCode(pythonFileName); // Open in VS Code
+                                helloCount = 0;
+
+                                // Wait for 5 seconds before opening in Chrome
+                                Thread.sleep(5000);
+
+                                // Open in Chrome
+                                openInChrome(pythonFileName, output);
+                            }
+                        }
+                    }
+
+                    System.out.println("Do you want to record another audio? (yes/no)");
+                    String response = scanner.nextLine().trim().toLowerCase();
+                    if (response.equals("no")) {
+                        System.out.println("Please enter the existing file name (without extension) to convert to a Python file: ");
+                        String fileName = scanner.nextLine().trim();
+
+                        String txtFileName = fileName + ".txt";
+                        String pyFileName = fileName + ".py";
+
+                        // Convert the text file to a Python file
+                        convertTextToPython(txtFileName, pyFileName);
+
+                        // Open and run the Python file in VS Code
+                        String output = openInVSCode(pyFileName);
+
+                        // Wait for 5 seconds before opening in Chrome
+                        Thread.sleep(5000);
+
+                        // Open the output page in Chrome with the captured output
+                        openInChrome(pyFileName, output);
+                        break;
+                    }
+                }
+
+            } catch (IOException | InterruptedException e) {
+                e.printStackTrace();
+            } finally {
+                scanner.close();
+            }
+        };
+    }
+
+    private void writeValuesToFile(String value, String fileName) throws IOException {
+        try (FileWriter fileWriter = new FileWriter(fileName, true)) {
+            fileWriter.write(value + " ");
+        }
+        System.out.println("Appended '" + value + "' to " + fileName);
+    }
+
+    private void convertTextToPython(String inputFileName, String outputFileName) throws IOException {
+        List<String> lines = java.nio.file.Files.readAllLines(java.nio.file.Paths.get(inputFileName));
+        try (FileWriter fileWriter = new FileWriter(outputFileName)) {
+            for (String line : lines) {
+                fileWriter.write(line + System.lineSeparator());
+            }
+        }
+        System.out.println("Converted " + inputFileName + " to " + outputFileName);
+    }
+
+    // Method to open the .py file in VS Code and run it
+    // Open and run the Python file in VS Code, then capture output and display it on a webpage in Chrome
+    public String openInVSCode(String filePath) {
+        StringBuilder output = new StringBuilder();
+        try {
+            // Correct VS Code executable path
+            String vsCodePath = "C:\\Users\\HP\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe";
+
+            // Open the Python file in VS Code
+            ProcessBuilder vsCodeProcessBuilder = new ProcessBuilder(vsCodePath, filePath);
+            vsCodeProcessBuilder.start();
+
+            System.out.println("Opened " + filePath + " in Visual Studio Code.");
+
+            // Command to run the Python script and capture the output
+            ProcessBuilder cmdProcessBuilder = new ProcessBuilder("python", filePath);
+            cmdProcessBuilder.redirectErrorStream(true);
+
+            Process process = cmdProcessBuilder.start();
+            try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
+                String line;
+                while ((line = reader.readLine()) != null) {
+                    output.append(line).append("\n");
+                }
+            }
+
+            // Wait for the process to complete
+            process.waitFor();
+
+            System.out.println("Executed " + filePath + " and captured output.");
+
+            // Add a delay before Chrome opens
+            Thread.sleep(5000);  // 5-second delay
+        } catch (IOException | InterruptedException e) {
+            System.out.println("Failed to open and run Python file: " + e.getMessage());
+        }
+        return output.toString();
+    }
+
+
+    public void openInChrome(String fileName, String output) {
+        try {
+            // Encode the output to make it URL-safe
+            String encodedOutput = java.net.URLEncoder.encode(output, "UTF-8");
+
+            // URL for the output page
+            String url = "http://localhost:6564/show-output?output=" + encodedOutput;
+
+            // Chrome executable path
+            String chromePath = "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe";
+            ProcessBuilder chromeProcess = new ProcessBuilder(chromePath, url);
+            chromeProcess.start();
+
+            System.out.println("Opened Chrome with output at " + url);
+        } catch (IOException e) {
+            System.out.println("Failed to open Chrome: " + e.getMessage());
+        }
+    }
+
+
+    // Controller method to render the HTML page with the output
+    @GetMapping("/show-output")
+    public String showOutput(@RequestParam String output, Model model) {
+        model.addAttribute("scriptOutput", output);
+        return "output"; // Returns the Thymeleaf template to render
+    }
+}
+
+------audio
+package com.example.demo.service;
+
+import javax.sound.sampled.*;
+import java.io.File;
+import java.io.IOException;
+
+public class AudioRecorder {
+    private AudioFormat audioFormat;
+    private TargetDataLine targetLine;
+
+    public void recordAudio(String filePath, int durationInSeconds) {
+        audioFormat = new AudioFormat(16000, 16, 1, true, true); // PCM format
+        DataLine.Info info = new DataLine.Info(TargetDataLine.class, audioFormat);
+
+        try {
+            targetLine = (TargetDataLine) AudioSystem.getLine(info);
+            targetLine.open(audioFormat);
+            targetLine.start();
+
+            System.out.println("Recording...");
+
+            AudioInputStream audioInputStream = new AudioInputStream(targetLine);
+            File audioFile = new File(filePath);
+            // Start recording
+            new Thread(() -> {
+                try {
+                    Thread.sleep(durationInSeconds * 1000);
+                } catch (InterruptedException e) {
+                    e.printStackTrace();
+                }
+                targetLine.stop();
+                targetLine.close();
+                System.out.println("Recording finished.");
+            }).start();
+
+            // Write audio data to file
+            AudioSystem.write(audioInputStream, AudioFileFormat.Type.WAVE, audioFile);
+        } catch (LineUnavailableException e) {
+            e.printStackTrace();
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+    }
+}
+
+
+
+
+
+
+
+
+
